@@ -15,7 +15,7 @@ app.add_middleware(
 )
 
 # OpenAI client
-client = OpenAI(api_key="YOUR_OPENAI_API_KEY")
+client = OpenAI(api_key="")
 
 # Load portfolio context
 with open("profile_context.txt", "r", encoding="utf-8") as f:
