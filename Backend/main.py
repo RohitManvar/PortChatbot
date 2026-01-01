@@ -1,46 +1,35 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
+from db import SessionLocal, init_db
+from models import Chat
+from rag import load_rag
 
-# Initialize app
-app = FastAPI(title="Portfolio AI Chatbot")
+app = FastAPI()
+client = OpenAI()
+vector_db = load_rag()
+init_db()
 
-# Enable CORS (important for frontend)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# OpenAI client
-client = OpenAI(api_key="")
-
-# Load portfolio context
-with open("profile_context.txt", "r", encoding="utf-8") as f:
-    CONTEXT = f.read()
-
-# Request schema
 class ChatRequest(BaseModel):
     message: str
 
-# Response schema
-class ChatResponse(BaseModel):
-    reply: str
+@app.post("/chat")
+def chat(req: ChatRequest):
+    docs = vector_db.similarity_search(req.message, k=3)
+    context = "\n".join([d.page_content for d in docs])
 
-@app.post("/chat", response_model=ChatResponse)
-def chat(request: ChatRequest):
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": CONTEXT},
-            {"role": "user", "content": request.message}
+            {"role": "system", "content": f"Answer using context:\n{context}"},
+            {"role": "user", "content": req.message}
         ]
     )
 
-    return {"reply": response.choices[0].message.content}
+    reply = response.choices[0].message.content
 
-@app.get("/")
-def root():
-    return {"status": "Portfolio AI Chatbot is running 🚀"}
+    db = SessionLocal()
+    db.add(Chat(user_message=req.message, bot_reply=reply))
+    db.commit()
+
+    return {"reply": reply}
