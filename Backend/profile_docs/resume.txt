@@ -1,0 +1,9 @@
+Rohit Manvar is an MCA student with strong interest in Data Engineering,
+Machine Learning, RAG systems, and full-stack development.
+
+Projects:
+- BookNest: Flutter eBook app using Firebase & Supabase
+- Weather Prediction: ML + Rule-based + Streamlit + API
+- RAG Chatbot: FAISS + LangChain + FastAPI
+Skills:
+Python, SQL, ML, NLP, FastAPI, Streamlit, Flutter, Firebase
