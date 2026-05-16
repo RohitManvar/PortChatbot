@@ -159,6 +159,28 @@ def delete_session(session_id: str):
     return {"ok": True}
 
 
+class TitleRequest(BaseModel):
+    message: str
+
+
+@app.post("/title")
+def generate_title(req: TitleRequest):
+    response = ollama.chat(
+        model="llama3.2:1b",
+        messages=[
+            {
+                "role": "system",
+                "content": "You generate concise 3-5 word titles for chat conversations. Reply with ONLY the title, no quotes, no punctuation, no explanation.",
+            },
+            {"role": "user", "content": f"Title for this question: {req.message}"},
+        ],
+        options={"num_predict": 16, "temperature": 0.3},
+    )
+    title = response.message.content.strip().strip('"').strip("'")
+    title = title.split("\n")[0][:50]
+    return {"title": title}
+
+
 @app.get("/admin/stats")
 def get_stats():
     db = SessionLocal()

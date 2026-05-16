@@ -13,10 +13,16 @@ import {
   Volume2,
   Square,
   Mic,
-  Menu,
   X,
-  ArrowRight,
+  ArrowUp,
   Plus,
+  User,
+  Info,
+  ExternalLink,
+  MessageSquarePlus,
+  LayoutDashboard,
+  Trash2,
+  Menu,
 } from "lucide-react";
 
 const Github = ({ size = 14 }: { size?: number }) => (
@@ -59,29 +65,118 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [listening, setListening] = useState(false);
   const [speaking, setSpeaking] = useState<number | null>(null);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const [search, setSearch] = useState("");
+  const [userName, setUserName] = useState<string | null>(null);
+  const [namePromptOpen, setNamePromptOpen] = useState(false);
+  const [nameInput, setNameInput] = useState("");
+  const [titles, setTitles] = useState<Record<string, string>>({});
+  const [isMobile, setIsMobile] = useState(false);
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
+  const inputBoxRef = useRef<HTMLInputElement>(null);
+  const chatAreaRef = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<any>(null);
+  const autoScrollRef = useRef(true);
+  const abortRef = useRef<AbortController | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const avatarRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    let sid = localStorage.getItem("chat_session");
-    if (!sid) {
-      sid = uuidv4();
+    const existing = localStorage.getItem("chat_session");
+    if (existing) {
+      loadSession(existing);
+    } else {
+      const sid = uuidv4();
       localStorage.setItem("chat_session", sid);
+      setSessionId(sid);
+      setMessages([
+        {
+          role: "bot",
+          text: "Hi, I'm Rohit's portfolio assistant. Ask me anything about his work, skills, or projects.",
+        },
+      ]);
     }
-    setSessionId(sid);
     fetchSessions();
-    setMessages([
-      {
-        role: "bot",
-        text: "Hi, I'm Rohit's portfolio assistant. Ask me anything about his work, skills, or projects.",
-      },
-    ]);
+
+    const savedName = localStorage.getItem("user_name");
+    if (savedName) {
+      setUserName(savedName);
+    } else {
+      setNamePromptOpen(true);
+    }
+
+    try {
+      const cached = JSON.parse(localStorage.getItem("chat_titles") || "{}");
+      setTitles(cached);
+    } catch {}
   }, []);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (autoScrollRef.current && chatAreaRef.current) {
+      chatAreaRef.current.scrollTop = chatAreaRef.current.scrollHeight;
+    }
   }, [messages, loading]);
+
+  function handleChatScroll() {
+    const el = chatAreaRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
+    autoScrollRef.current = nearBottom;
+  }
+
+  useEffect(() => {
+    function onClickOutside(e: MouseEvent) {
+      const target = e.target as Node;
+      const inMenu = menuRef.current?.contains(target);
+      const onAvatar = avatarRef.current?.contains(target);
+      if (!inMenu && !onAvatar) {
+        setMenuOpen(false);
+      }
+    }
+    if (menuOpen) document.addEventListener("mousedown", onClickOutside);
+    return () => document.removeEventListener("mousedown", onClickOutside);
+  }, [menuOpen]);
+
+  useEffect(() => {
+    function check() {
+      setIsMobile(window.innerWidth < 900);
+    }
+    check();
+    window.addEventListener("resize", check);
+    return () => window.removeEventListener("resize", check);
+  }, []);
+
+  useEffect(() => {
+    function onKey(e: globalThis.KeyboardEvent) {
+      if (e.key === "Escape") {
+        setMenuOpen(false);
+        setAboutOpen(false);
+        setNamePromptOpen(false);
+      }
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        inputBoxRef.current?.focus();
+      }
+      if (mod && e.key.toLowerCase() === "j") {
+        e.preventDefault();
+        newChat();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  async function clearAllHistory() {
+    if (!confirm("Delete all chat history? This cannot be undone.")) return;
+    for (const s of sessions) {
+      await fetch(`${API}/sessions/${s.session_id}`, { method: "DELETE" });
+    }
+    fetchSessions();
+    newChat();
+    setMenuOpen(false);
+  }
 
   async function fetchSessions() {
     try {
@@ -109,7 +204,7 @@ export default function Home() {
         });
       }
       setMessages(msgs);
-      setSidebarOpen(false);
+      setMobileSidebarOpen(false);
     } catch {}
   }
 
@@ -120,7 +215,7 @@ export default function Home() {
     setMessages([
       { role: "bot", text: "Hi, I'm Rohit's portfolio assistant. Ask me anything about his work, skills, or projects." },
     ]);
-    setSidebarOpen(false);
+    setMobileSidebarOpen(false);
   }
 
   async function deleteSession(sid: string, e: React.MouseEvent) {
@@ -130,19 +225,49 @@ export default function Home() {
     if (sid === sessionId) newChat();
   }
 
+  function stop() {
+    abortRef.current?.abort();
+  }
+
+  async function generateTitle(sid: string, msg: string) {
+    try {
+      const res = await fetch(`${API}/title`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: msg }),
+      });
+      const data = await res.json();
+      if (data.title) {
+        setTitles((prev) => {
+          const next = { ...prev, [sid]: data.title };
+          localStorage.setItem("chat_titles", JSON.stringify(next));
+          return next;
+        });
+      }
+    } catch {}
+  }
+
   async function send(text?: string) {
     const msg = (text ?? input).trim();
     if (!msg || loading) return;
 
+    const isFirstUserMessage = !messages.some((m) => m.role === "user");
+
     setMessages((prev) => [...prev, { role: "user", text: msg }, { role: "bot", text: "" }]);
     setInput("");
     setLoading(true);
+
+    if (isFirstUserMessage) generateTitle(sessionId, msg);
+
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
       const res = await fetch(`${API}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ message: msg, session_id: sessionId }),
+        signal: controller.signal,
       });
 
       const reader = res.body!.getReader();
@@ -154,31 +279,31 @@ export default function Home() {
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        buffer += decoder.decode(value, { stream: true });
+        const chunk = decoder.decode(value, { stream: true });
 
-        if (!sourcesParsed && buffer.includes("__END__")) {
-          const match = buffer.match(/^__SOURCES__(.*?)__END__/);
-          if (match) {
-            try {
-              sources = JSON.parse(match[1]);
-            } catch {}
-            buffer = buffer.slice(match[0].length);
-            sourcesParsed = true;
-            setMessages((prev) => {
-              const updated = [...prev];
-              updated[updated.length - 1] = { role: "bot", text: buffer, sources };
-              return updated;
-            });
-            continue;
+        if (!sourcesParsed) {
+          buffer += chunk;
+          if (buffer.includes("__END__")) {
+            const match = buffer.match(/^__SOURCES__(.*?)__END__/);
+            if (match) {
+              try {
+                sources = JSON.parse(match[1]);
+              } catch {}
+              const initialText = buffer.slice(match[0].length);
+              sourcesParsed = true;
+              setMessages((prev) => {
+                const updated = [...prev];
+                updated[updated.length - 1] = { role: "bot", text: initialText, sources };
+                return updated;
+              });
+            }
           }
-        }
-
-        if (sourcesParsed) {
+        } else {
           setMessages((prev) => {
             const updated = [...prev];
             updated[updated.length - 1] = {
               role: "bot",
-              text: updated[updated.length - 1].text + decoder.decode(value, { stream: true }),
+              text: updated[updated.length - 1].text + chunk,
               sources,
             };
             return updated;
@@ -186,14 +311,28 @@ export default function Home() {
         }
       }
       fetchSessions();
-    } catch {
-      setMessages((prev) => {
-        const updated = [...prev];
-        updated[updated.length - 1] = { role: "bot", text: "Sorry, I couldn't reach the server." };
-        return updated;
-      });
+    } catch (err: any) {
+      if (err?.name === "AbortError") {
+        setMessages((prev) => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          updated[updated.length - 1] = {
+            ...last,
+            text: (last.text || "") + "\n\n_— stopped_",
+          };
+          return updated;
+        });
+        fetchSessions();
+      } else {
+        setMessages((prev) => {
+          const updated = [...prev];
+          updated[updated.length - 1] = { role: "bot", text: "Sorry, I couldn't reach the server." };
+          return updated;
+        });
+      }
     } finally {
       setLoading(false);
+      abortRef.current = null;
     }
   }
 
@@ -247,6 +386,8 @@ export default function Home() {
     navigator.clipboard.writeText(text);
   }
 
+  const hasUserMessage = messages.some((m) => m.role === "user");
+
   return (
     <>
       <Head>
@@ -257,72 +398,100 @@ export default function Home() {
         />
       </Head>
 
-      <div style={styles.page}>
-        {sidebarOpen && (
-          <div style={styles.sidebar}>
-            <div style={styles.sidebarHeader}>
-              <h3 style={styles.sidebarTitle}>Conversations</h3>
-              <button style={styles.newBtn} onClick={newChat}><Plus size={14} /> New</button>
-            </div>
-            <div style={styles.sessionList}>
-              {sessions.length === 0 && <p style={styles.empty}>No past conversations yet.</p>}
-              {sessions.map((s) => (
-                <div
-                  key={s.session_id}
-                  style={{
-                    ...styles.sessionItem,
-                    background: s.session_id === sessionId ? "#ebe7dc" : "transparent",
-                  }}
-                  onClick={() => loadSession(s.session_id)}
-                >
-                  <div style={styles.sessionTitle}>{s.title}</div>
-                  <div style={styles.sessionMeta}>{s.count} msgs</div>
-                  <button style={styles.deleteBtn} onClick={(e) => deleteSession(s.session_id, e)}><X size={14} /></button>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        <div style={styles.container}>
-          <header style={styles.header}>
+      <div style={{ ...styles.page, ...(isMobile && styles.pageMobile) }}>
+        <div style={{ ...styles.container, justifyContent: hasUserMessage ? "flex-start" : "center" }}>
+          <header style={{ ...styles.header, ...(hasUserMessage ? styles.headerCompact : styles.headerHero) }}>
             <div style={styles.headerLeft}>
-              <button style={styles.menuBtn} onClick={() => setSidebarOpen(!sidebarOpen)}>
-                {sidebarOpen ? <X size={18} /> : <Menu size={18} />}
+              <button
+                ref={avatarRef}
+                style={{
+                  ...styles.avatar,
+                  ...(hasUserMessage ? styles.avatarCompact : styles.avatarHero),
+                  ...(isMobile && !hasUserMessage && styles.avatarHeroMobile),
+                  ...(isMobile && hasUserMessage && styles.avatarCompactMobile),
+                  cursor: "pointer", border: "none",
+                }}
+                onClick={() => setMenuOpen((v) => !v)}
+                title="Menu"
+              >
+                R
               </button>
-              <div style={styles.avatar}>R</div>
-              <div>
-                <h1 style={styles.title}>Ask Rohit.</h1>
-                <p style={styles.subtitle}>Portfolio assistant — Llama 3.2 · FAISS · LangChain</p>
-              </div>
-            </div>
-            <div style={styles.statusDot}>
-              <span style={styles.dot} />
-              <span style={styles.statusText}>online</span>
+              {!hasUserMessage && (
+                <div>
+                  <h1 style={{ ...styles.title, ...styles.titleHero, ...(isMobile && styles.titleHeroMobile) }}>Ask Rohit.</h1>
+                  <p style={styles.subtitle}>Portfolio assistant — Llama 3.2 · FAISS · LangChain</p>
+                </div>
+              )}
             </div>
           </header>
 
-          <div style={styles.ctaRow}>
-            {CTAs.map((c) => {
-              const Icon = c.icon;
-              return (
-                <a
-                  key={c.label}
-                  href={c.href}
-                  target={c.href.startsWith("http") ? "_blank" : undefined}
-                  rel="noopener noreferrer"
-                  download={c.download}
-                  style={styles.ctaLink}
-                >
-                  <Icon size={14} />
-                  {c.label}
-                </a>
-              );
-            })}
-          </div>
+          {isMobile && hasUserMessage && (
+            <button
+              style={styles.mobileMenuToggle}
+              onClick={() => setMobileSidebarOpen(true)}
+              title="Open conversations"
+            >
+              <Menu size={20} />
+            </button>
+          )}
 
-          <section style={styles.chatCard}>
-            <div style={styles.chatArea}>
+          {menuOpen && (
+            <div
+              ref={menuRef}
+              style={hasUserMessage ? styles.menuCompact : styles.menuHero}
+            >
+              <button style={styles.menuItem} onClick={() => { setAboutOpen(true); setMenuOpen(false); }}>
+                <Info size={16} /> About this assistant
+              </button>
+              <button style={styles.menuItem} onClick={() => { newChat(); setMenuOpen(false); }}>
+                <MessageSquarePlus size={16} /> New chat
+              </button>
+              <a style={styles.menuItem} href="https://github.com/RohitManvar" target="_blank" rel="noopener noreferrer" onClick={() => setMenuOpen(false)}>
+                <ExternalLink size={16} /> View portfolio
+              </a>
+              <a style={styles.menuItem} href="https://github.com/RohitManvar/PortChatbot" target="_blank" rel="noopener noreferrer" onClick={() => setMenuOpen(false)}>
+                <ExternalLink size={16} /> Source code
+              </a>
+              <a style={styles.menuItem} href="/admin" onClick={() => setMenuOpen(false)}>
+                <LayoutDashboard size={16} /> Admin panel
+              </a>
+              <div style={styles.menuDivider} />
+              <button style={{ ...styles.menuItem, color: "#dc2626" }} onClick={clearAllHistory}>
+                <Trash2 size={16} /> Clear all history
+              </button>
+            </div>
+          )}
+
+          {aboutOpen && (
+            <div style={styles.modalOverlay} onClick={() => setAboutOpen(false)}>
+              <div style={styles.modalCard} onClick={(e) => e.stopPropagation()}>
+                <button style={styles.modalClose} onClick={() => setAboutOpen(false)}>
+                  <X size={18} />
+                </button>
+                <h2 style={styles.modalTitle}>About this assistant</h2>
+                <p style={styles.modalText}>
+                  A privacy-first portfolio chatbot powered by a local LLM. Ask anything about Rohit's work, skills, and projects — answers are grounded in his resume via RAG (Retrieval-Augmented Generation).
+                </p>
+                <div style={styles.modalStack}>
+                  <h3 style={styles.modalSubtitle}>Tech</h3>
+                  <ul style={styles.modalList}>
+                    <li>Ollama (Llama 3.2 · 1B)</li>
+                    <li>FAISS vector store</li>
+                    <li>LangChain document chunking</li>
+                    <li>FastAPI streaming backend</li>
+                    <li>Next.js + React frontend</li>
+                    <li>SQLite chat history</li>
+                  </ul>
+                </div>
+                <p style={styles.modalNote}>
+                  <strong>Fully private:</strong> No API calls leave your machine. The model runs entirely on local hardware.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {hasUserMessage && (
+            <div style={styles.chatAreaBare} ref={chatAreaRef} onScroll={handleChatScroll}>
               {messages.map((m, i) => (
                 <div key={i} style={m.role === "user" ? styles.rowRight : styles.rowLeft}>
                   {m.role === "bot" && <div style={styles.botBadge}>R</div>}
@@ -391,51 +560,177 @@ export default function Home() {
                   </div>
                 </div>
               ))}
-              <div ref={bottomRef} />
+            </div>
+          )}
+
+          <div style={styles.inputRow}>
+              <button
+                style={{
+                  ...styles.pillIconBtn,
+                  color: listening ? "#dc2626" : INK,
+                }}
+                onClick={toggleVoice}
+                title="Voice input"
+              >
+                <Mic size={18} />
+              </button>
+              <input
+                ref={inputBoxRef}
+                style={styles.input}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKey}
+                placeholder="Ask anything"
+                disabled={loading}
+              />
+              {loading ? (
+                <button
+                  style={{ ...styles.sendCircle, cursor: "pointer" }}
+                  onClick={stop}
+                  title="Stop generating"
+                >
+                  <Square size={14} fill="currentColor" />
+                </button>
+              ) : (
+                <button
+                  style={{
+                    ...styles.sendCircle,
+                    opacity: !input.trim() ? 0.3 : 1,
+                    cursor: !input.trim() ? "not-allowed" : "pointer",
+                  }}
+                  onClick={() => send()}
+                  disabled={!input.trim()}
+                  title="Send"
+                >
+                  <ArrowUp size={18} strokeWidth={2.5} />
+                </button>
+              )}
             </div>
 
-            <div style={styles.suggestions}>
+          <footer style={styles.footer}>
+            <span>Powered locally — no API calls, fully private.</span>
+          </footer>
+        </div>
+
+        {isMobile && mobileSidebarOpen && (
+          <div style={styles.mobileBackdrop} onClick={() => setMobileSidebarOpen(false)} />
+        )}
+
+        <aside style={{
+          ...styles.sidebar,
+          ...(isMobile && styles.sidebarMobile),
+          ...(isMobile && {
+            transform: mobileSidebarOpen ? "translateX(0)" : "translateX(100%)",
+          }),
+        }}>
+          <div style={styles.sidebarHeader}>
+            <h3 style={styles.sidebarTitle}>Conversations</h3>
+            <button style={styles.newBtn} onClick={newChat}><Plus size={14} /> New</button>
+          </div>
+          {sessions.length > 0 && (
+            <input
+              style={styles.searchInput}
+              type="text"
+              placeholder="Search conversations…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+          )}
+          <div style={styles.sessionList}>
+            {sessions.length === 0 && <p style={styles.empty}>No past conversations yet.</p>}
+            {sessions
+              .map((s) => ({ ...s, displayTitle: titles[s.session_id] || s.title }))
+              .filter((s) =>
+                search ? s.displayTitle.toLowerCase().includes(search.toLowerCase()) : true
+              )
+              .map((s) => (
+                <div
+                  key={s.session_id}
+                  style={{
+                    ...styles.sessionItem,
+                    background: s.session_id === sessionId ? "#ebe7dc" : "transparent",
+                  }}
+                  onClick={() => loadSession(s.session_id)}
+                >
+                  <div style={styles.sessionTitle}>{s.displayTitle}</div>
+                  <div style={styles.sessionMeta}>{s.count} msgs</div>
+                  <button style={styles.deleteBtn} onClick={(e) => deleteSession(s.session_id, e)}><X size={14} /></button>
+                </div>
+              ))}
+          </div>
+
+          <div style={styles.suggestionsBlock}>
+            <div style={styles.suggestionsLabel}>Try asking</div>
+            <div style={styles.suggestionsList}>
               {SUGGESTIONS.map((s) => (
                 <button key={s} style={styles.chip} onClick={() => send(s)} disabled={loading}>
                   {s}
                 </button>
               ))}
             </div>
+          </div>
+        </aside>
 
-            <div style={styles.inputRow}>
-              <button
-                style={{ ...styles.iconBtn, background: listening ? "#fca5a5" : "transparent" }}
-                onClick={toggleVoice}
-                title="Voice input"
-              >
-                <Mic size={16} />
-              </button>
-              <input
-                style={styles.input}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKey}
-                placeholder="Ask anything about Rohit…"
-                disabled={loading}
-              />
-              <button
-                style={{
-                  ...styles.sendBtn,
-                  opacity: loading || !input.trim() ? 0.4 : 1,
-                  cursor: loading || !input.trim() ? "not-allowed" : "pointer",
-                }}
-                onClick={() => send()}
-                disabled={loading || !input.trim()}
-              >
-                Send <ArrowRight size={14} />
-              </button>
+        {!isMobile && (
+          <div style={styles.userPill} title={userName || "Set your name"} onClick={() => setNamePromptOpen(true)}>
+            <div style={styles.userIcon}>
+              {userName ? userName.trim().charAt(0).toUpperCase() : <User size={18} />}
             </div>
-          </section>
+            {userName && <span style={styles.userPillName}>{userName}</span>}
+          </div>
+        )}
 
-          <footer style={styles.footer}>
-            <span>Powered locally — no API calls, fully private. <a href="/admin" style={styles.footerLink}>Admin →</a></span>
-          </footer>
-        </div>
+        {namePromptOpen && (
+          <div style={styles.modalOverlay} onClick={() => setNamePromptOpen(false)}>
+            <div style={{ ...styles.modalCard, maxWidth: 380 }} onClick={(e) => e.stopPropagation()}>
+              <button style={styles.modalClose} onClick={() => setNamePromptOpen(false)}>
+                <X size={18} />
+              </button>
+              <h2 style={styles.modalTitle}>What's your name?</h2>
+              <p style={styles.modalText}>
+                I'll use it to personalize our chat. Just first name is fine.
+              </p>
+              <input
+                style={{ ...styles.input, background: CREAM, border: `1px solid ${BORDER}`, marginBottom: 12, padding: "12px 16px", borderRadius: 10 }}
+                value={nameInput}
+                onChange={(e) => setNameInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    const v = nameInput.trim();
+                    if (v) {
+                      localStorage.setItem("user_name", v);
+                      setUserName(v);
+                    }
+                    setNamePromptOpen(false);
+                  }
+                }}
+                placeholder="Your name"
+                autoFocus
+              />
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  style={{ ...styles.newBtn, padding: "10px 16px", flex: 1, justifyContent: "center" }}
+                  onClick={() => {
+                    const v = nameInput.trim();
+                    if (v) {
+                      localStorage.setItem("user_name", v);
+                      setUserName(v);
+                    }
+                    setNamePromptOpen(false);
+                  }}
+                >
+                  Save
+                </button>
+                <button
+                  style={{ ...styles.menuItem, background: "transparent", border: `1px solid ${BORDER}`, padding: "10px 16px", justifyContent: "center", flex: 1 }}
+                  onClick={() => setNamePromptOpen(false)}
+                >
+                  Skip
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </>
   );
@@ -452,27 +747,36 @@ const BORDER = "#e5e2d9";
 
 const styles: Record<string, React.CSSProperties> = {
   page: {
-    minHeight: "100vh",
+    height: "100vh",
     background: CREAM,
     fontFamily: FONT_SANS,
     color: INK,
     display: "flex",
-    padding: "40px 20px",
+    padding: "24px 0 24px 20px",
     gap: 20,
     justifyContent: "center",
+    overflow: "hidden",
   },
   sidebar: {
-    width: 260,
+    width: 290,
     background: PAPER,
     border: `1px solid ${BORDER}`,
-    borderRadius: 14,
-    padding: 16,
+    borderRadius: 20,
+    padding: 18,
     display: "flex",
     flexDirection: "column",
     gap: 12,
-    maxHeight: "85vh",
-    position: "sticky",
-    top: 40,
+    flexShrink: 0,
+    height: "100%",
+    minHeight: 0,
+    boxShadow: "0 2px 6px rgba(0,0,0,0.04), 0 12px 32px -8px rgba(0,0,0,0.08)",
+  },
+  curveDivider: {
+    width: "100%",
+    height: 18,
+    display: "block",
+    margin: "0 0 6px 0",
+    opacity: 0.6,
   },
   sidebarHeader: { display: "flex", justifyContent: "space-between", alignItems: "center" },
   sidebarTitle: { fontFamily: FONT_SERIF, fontSize: 18, margin: 0 },
@@ -481,7 +785,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "6px 12px", fontSize: 12, cursor: "pointer", fontWeight: 600,
     display: "inline-flex", alignItems: "center", gap: 4,
   },
-  sessionList: { display: "flex", flexDirection: "column", gap: 4, overflowY: "auto" },
+  sessionList: { display: "flex", flexDirection: "column", gap: 4, overflowY: "auto", flex: 1, minHeight: 0 },
   empty: { color: MUTED, fontSize: 13, textAlign: "center", padding: 16 },
   sessionItem: {
     padding: "10px 12px", borderRadius: 8, cursor: "pointer", position: "relative",
@@ -494,26 +798,39 @@ const styles: Record<string, React.CSSProperties> = {
     border: "none", color: MUTED, cursor: "pointer", lineHeight: 1,
     display: "inline-flex", alignItems: "center",
   },
-  container: { width: "100%", maxWidth: 720, display: "flex", flexDirection: "column", gap: 16 },
+  container: {
+    width: "100%", maxWidth: 760, display: "flex", flexDirection: "column",
+    gap: 10, minHeight: 0, flex: 1,
+    transition: "justify-content 0.4s ease",
+  },
   header: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 },
   headerLeft: { display: "flex", alignItems: "center", gap: 14 },
-  menuBtn: {
-    background: PAPER, border: `1px solid ${BORDER}`, borderRadius: 8,
-    padding: "6px 10px", fontSize: 16, cursor: "pointer",
-  },
   avatar: {
-    width: 52, height: 52, borderRadius: "50%", background: INK, color: CREAM,
+    borderRadius: "50%", background: INK, color: CREAM,
     display: "flex", alignItems: "center", justifyContent: "center",
-    fontFamily: FONT_SERIF, fontSize: 24, fontWeight: 600, flexShrink: 0,
+    fontFamily: FONT_SERIF, fontWeight: 600, flexShrink: 0,
+    transition: "width 0.4s cubic-bezier(0.4, 0, 0.2, 1), height 0.4s cubic-bezier(0.4, 0, 0.2, 1), font-size 0.4s cubic-bezier(0.4, 0, 0.2, 1)",
   },
-  title: { fontFamily: FONT_SERIF, fontSize: 30, fontWeight: 600, margin: 0, letterSpacing: "-0.02em" },
-  subtitle: { fontSize: 12.5, color: MUTED, margin: "2px 0 0 0" },
-  statusDot: {
-    display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: MUTED,
-    background: PAPER, padding: "6px 12px", borderRadius: 999, border: `1px solid ${BORDER}`,
+  avatarHero: { width: 96, height: 96, fontSize: 42 },
+  avatarCompact: {
+    width: 48, height: 48, fontSize: 22,
+    position: "fixed", top: 20, left: 20, zIndex: 5,
+    boxShadow: "0 4px 12px rgba(0,0,0,0.12)",
   },
-  dot: { width: 7, height: 7, borderRadius: "50%", background: "#22c55e", boxShadow: "0 0 0 3px rgba(34,197,94,0.15)" },
-  statusText: { fontWeight: 500 },
+  title: {
+    fontFamily: FONT_SERIF, fontWeight: 600,
+    margin: 0, letterSpacing: "-0.03em", lineHeight: 1.05, color: INK,
+    transition: "font-size 0.4s cubic-bezier(0.4, 0, 0.2, 1)",
+  },
+  titleHero: { fontSize: 72 },
+  titleCompact: { fontSize: 36 },
+  headerHero: { paddingBottom: 8 },
+  headerCompact: { paddingBottom: 0 },
+  subtitle: { fontSize: 13, color: MUTED, margin: "4px 0 0 0" },
+  chatAreaBare: {
+    flex: 1, minHeight: 0, padding: "8px 0 16px",
+    display: "flex", flexDirection: "column", gap: 20, overflowY: "auto",
+  },
   ctaRow: { display: "flex", gap: 8, flexWrap: "wrap" },
   ctaLink: {
     background: PAPER, border: `1px solid ${BORDER}`, color: INK,
@@ -522,13 +839,14 @@ const styles: Record<string, React.CSSProperties> = {
     display: "inline-flex", alignItems: "center", gap: 6,
   },
   chatCard: {
-    background: PAPER, borderRadius: 18, border: `1px solid ${BORDER}`,
+    background: PAPER, borderRadius: 20, border: `1px solid ${BORDER}`,
     overflow: "hidden", display: "flex", flexDirection: "column",
-    boxShadow: "0 1px 3px rgba(0,0,0,0.03), 0 8px 24px rgba(0,0,0,0.04)",
+    boxShadow: "0 2px 6px rgba(0,0,0,0.04), 0 12px 32px -8px rgba(0,0,0,0.08)",
+    flex: 1, minHeight: 0,
   },
   chatArea: {
-    padding: "28px 24px", display: "flex", flexDirection: "column", gap: 18,
-    minHeight: 380, maxHeight: 520, overflowY: "auto",
+    flex: 1, minHeight: 0, padding: "28px 24px 16px",
+    display: "flex", flexDirection: "column", gap: 18, overflowY: "auto",
   },
   rowLeft: { display: "flex", alignItems: "flex-start", gap: 10 },
   rowRight: { display: "flex", justifyContent: "flex-end" },
@@ -571,30 +889,142 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: 4, border: `1px solid ${BORDER}`,
   },
   sourceText: { color: "#4a4a4a", fontSize: 12, fontStyle: "italic" },
-  suggestions: {
-    display: "flex", flexWrap: "wrap", gap: 8, padding: "16px 20px 12px",
-    borderTop: `1px solid ${BORDER}`,
+  suggestionsBlock: {
+    display: "flex", flexDirection: "column", gap: 8,
+    paddingTop: 12, borderTop: `1px solid ${BORDER}`,
+    flexShrink: 0,
   },
+  suggestionsLabel: {
+    fontSize: 11, fontWeight: 600, color: MUTED,
+    textTransform: "uppercase", letterSpacing: "0.06em",
+  },
+  suggestionsList: { display: "flex", flexDirection: "column", gap: 6 },
   chip: {
-    background: PAPER, border: `1px solid ${BORDER}`, color: INK,
-    borderRadius: 999, padding: "6px 14px", fontSize: 12.5,
+    background: CREAM, border: `1px solid ${BORDER}`, color: INK,
+    borderRadius: 10, padding: "8px 12px", fontSize: 12.5,
     fontFamily: FONT_SANS, fontWeight: 500, cursor: "pointer",
+    textAlign: "left", width: "100%",
   },
-  inputRow: { display: "flex", gap: 8, padding: "12px 16px 16px", background: PAPER, borderTop: `1px solid ${BORDER}` },
-  iconBtn: {
-    background: "transparent", border: `1px solid ${BORDER}`, borderRadius: 10,
-    padding: "10px 12px", cursor: "pointer", fontSize: 14, color: INK,
+  inputRow: {
+    display: "flex", alignItems: "center", gap: 4,
+    margin: "12px 0 4px", padding: "6px 6px 6px 14px",
+    background: PAPER, border: `1px solid ${BORDER}`, borderRadius: 999,
+    boxShadow: "0 6px 22px -6px rgba(0,0,0,0.10), 0 2px 6px rgba(0,0,0,0.04)",
+    flexShrink: 0,
+  },
+  pillIconBtn: {
+    background: "transparent", border: "none", color: INK,
+    width: 38, height: 38, borderRadius: "50%",
     display: "inline-flex", alignItems: "center", justifyContent: "center",
+    cursor: "pointer", flexShrink: 0,
   },
   input: {
-    flex: 1, background: CREAM, border: `1px solid ${BORDER}`, borderRadius: 10,
-    padding: "12px 16px", color: INK, fontSize: 14.5, fontFamily: FONT_SANS, outline: "none",
+    flex: 1, background: "transparent", border: "none",
+    padding: "10px 8px", color: INK, fontSize: 15, fontFamily: FONT_SANS,
+    outline: "none", minWidth: 0,
   },
-  sendBtn: {
-    background: INK, color: PAPER, border: "none", borderRadius: 10,
-    padding: "12px 22px", fontWeight: 600, fontSize: 14, fontFamily: FONT_SANS,
-    display: "inline-flex", alignItems: "center", gap: 6,
+  sendCircle: {
+    background: INK, color: PAPER, border: "none",
+    width: 38, height: 38, borderRadius: "50%",
+    display: "inline-flex", alignItems: "center", justifyContent: "center",
+    flexShrink: 0, transition: "opacity 0.15s",
   },
   footer: { textAlign: "center", fontSize: 12, color: MUTED, padding: "8px 0" },
   footerLink: { color: INK, textDecoration: "underline", marginLeft: 4 },
+  userPill: {
+    position: "fixed", left: 20, bottom: 20,
+    display: "flex", alignItems: "center", gap: 8,
+    background: PAPER, border: `1px solid ${BORDER}`,
+    borderRadius: 999, padding: 6,
+    boxShadow: "0 4px 12px rgba(0,0,0,0.08)",
+    zIndex: 10, cursor: "pointer",
+  },
+  userIcon: {
+    width: 36, height: 36, borderRadius: "50%", background: INK, color: PAPER,
+    display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0,
+    fontFamily: FONT_SERIF, fontSize: 17, fontWeight: 600,
+  },
+  userPillName: {
+    fontSize: 13, fontWeight: 500, color: INK, paddingRight: 10,
+  },
+  searchInput: {
+    width: "100%", background: CREAM, border: `1px solid ${BORDER}`,
+    borderRadius: 10, padding: "8px 12px", color: INK, fontSize: 13,
+    fontFamily: FONT_SANS, outline: "none", flexShrink: 0,
+  },
+  pageMobile: { padding: "16px 12px" },
+  avatarHeroMobile: { width: 64, height: 64, fontSize: 28 },
+  avatarCompactMobile: { width: 40, height: 40, fontSize: 18, top: 12, left: 12 },
+  titleHeroMobile: { fontSize: 44 },
+  mobileMenuToggle: {
+    position: "fixed", top: 12, right: 12, zIndex: 30,
+    width: 40, height: 40, borderRadius: "50%",
+    background: PAPER, border: `1px solid ${BORDER}`, color: INK,
+    display: "inline-flex", alignItems: "center", justifyContent: "center",
+    cursor: "pointer",
+    boxShadow: "0 4px 12px rgba(0,0,0,0.08)",
+  },
+  mobileBackdrop: {
+    position: "fixed", inset: 0, background: "rgba(26,26,26,0.4)",
+    zIndex: 80, backdropFilter: "blur(2px)",
+  },
+  sidebarMobile: {
+    position: "fixed", top: 0, right: 0, bottom: 0,
+    height: "100vh", width: "min(320px, 88vw)",
+    borderRadius: 0, margin: 0, zIndex: 90,
+    transition: "transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
+  },
+  menuCompact: {
+    position: "fixed", top: 78, left: 20, zIndex: 20,
+    width: 240, background: PAPER, border: `1px solid ${BORDER}`,
+    borderRadius: 14, padding: 6,
+    boxShadow: "0 10px 30px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.06)",
+    display: "flex", flexDirection: "column", gap: 2,
+  },
+  menuHero: {
+    position: "absolute", marginTop: 110, zIndex: 20,
+    width: 240, background: PAPER, border: `1px solid ${BORDER}`,
+    borderRadius: 14, padding: 6,
+    boxShadow: "0 10px 30px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.06)",
+    display: "flex", flexDirection: "column", gap: 2,
+  },
+  menuItem: {
+    display: "flex", alignItems: "center", gap: 10,
+    padding: "9px 12px", borderRadius: 8,
+    background: "transparent", border: "none", color: INK,
+    fontSize: 13.5, fontFamily: FONT_SANS, fontWeight: 500,
+    cursor: "pointer", textAlign: "left", width: "100%",
+    textDecoration: "none",
+  },
+  menuDivider: { height: 1, background: BORDER, margin: "4px 6px" },
+  modalOverlay: {
+    position: "fixed", inset: 0, background: "rgba(26,26,26,0.4)",
+    display: "flex", alignItems: "center", justifyContent: "center",
+    zIndex: 50, padding: 20, backdropFilter: "blur(4px)",
+  },
+  modalCard: {
+    background: PAPER, borderRadius: 18, padding: "32px 28px",
+    maxWidth: 480, width: "100%", position: "relative",
+    boxShadow: "0 20px 50px rgba(0,0,0,0.25)",
+    maxHeight: "85vh", overflowY: "auto",
+  },
+  modalClose: {
+    position: "absolute", top: 14, right: 14, background: "transparent",
+    border: "none", color: MUTED, cursor: "pointer",
+    width: 32, height: 32, borderRadius: "50%",
+    display: "inline-flex", alignItems: "center", justifyContent: "center",
+  },
+  modalTitle: {
+    fontFamily: FONT_SERIF, fontSize: 28, fontWeight: 600,
+    margin: "0 0 12px 0", letterSpacing: "-0.02em",
+  },
+  modalSubtitle: {
+    fontFamily: FONT_SANS, fontSize: 12, fontWeight: 600,
+    textTransform: "uppercase", letterSpacing: "0.06em",
+    color: MUTED, margin: "0 0 8px 0",
+  },
+  modalText: { fontSize: 14.5, lineHeight: 1.65, color: INK, margin: "0 0 20px 0" },
+  modalStack: { background: CREAM, borderRadius: 12, padding: 16, marginBottom: 16 },
+  modalList: { fontSize: 13.5, lineHeight: 1.8, color: INK, paddingLeft: 18, margin: 0 },
+  modalNote: { fontSize: 13, color: MUTED, margin: 0, lineHeight: 1.6 },
 };

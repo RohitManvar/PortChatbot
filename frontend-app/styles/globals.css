@@ -23,6 +23,11 @@ button:hover {
   filter: brightness(0.95);
 }
 
+[role="menuitem"]:hover,
+.menu-item:hover {
+  background: #f5f3ee;
+}
+
 input::placeholder {
   color: #9a9a9a;
 }
